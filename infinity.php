@@ -458,6 +458,56 @@ final class MatchEngine
             $hCandidates = [max(2, $observedUnique)];
         }
 
+        return self::rankInternal($targetLength, $observedUnique, $dimension, $minRoot, $limit, $pCandidates, $hCandidates);
+    }
+
+    /**
+     * @param array<string,mixed> $cfg
+     * @param array{char_length:int,unique_count:int} $analysis
+     * @param list<int> $pCandidates
+     * @param list<int> $hCandidates
+     * @return list<array<string,mixed>>
+     */
+    public static function rankWithCandidates(array $cfg, array $analysis, int $limit, array $pCandidates, array $hCandidates, ?int $dimension = null): array
+    {
+        $limit = max(1, min(12, $limit));
+        $targetLength = max(1, (int)$analysis['char_length']);
+        $observedUnique = max(1, (int)$analysis['unique_count']);
+        $minRoot = (int)$cfg['min_root'];
+        $dimension = $dimension === null ? (int)$cfg['dimension'] : max(1, $dimension);
+
+        $pCandidates = self::sanitizeCandidates($pCandidates, 2);
+        $hCandidates = self::sanitizeCandidates($hCandidates, 2);
+        if ($pCandidates === [] || $hCandidates === []) {
+            return [];
+        }
+
+        return self::rankInternal($targetLength, $observedUnique, $dimension, $minRoot, $limit, $pCandidates, $hCandidates);
+    }
+
+    /** @param list<int> $candidates */
+    private static function sanitizeCandidates(array $candidates, int $min): array
+    {
+        $out = [];
+        $seen = [];
+        foreach ($candidates as $value) {
+            $value = (int)$value;
+            if ($value < $min || isset($seen[$value])) {
+                continue;
+            }
+            $seen[$value] = true;
+            $out[] = $value;
+        }
+        return $out;
+    }
+
+    /**
+     * @param list<int> $pCandidates
+     * @param list<int> $hCandidates
+     * @return list<array<string,mixed>>
+     */
+    private static function rankInternal(int $targetLength, int $observedUnique, int $dimension, int $minRoot, int $limit, array $pCandidates, array $hCandidates): array
+    {
         $rows = [];
         foreach ($hCandidates as $h) {
             foreach ($pCandidates as $p) {
@@ -535,6 +585,9 @@ final class NDCodex
     /** @var list<array<string,mixed>> */
     private array $lastMatches = [];
 
+    /** @var array{line_count:int,char_length:int,unique_count:int,unique_chars:list<string>,preview:string}|null */
+    private ?array $lastPasteAnalysis = null;
+
     public function __construct()
     {
         $this->cfg = [
@@ -570,7 +623,11 @@ final class NDCodex
             try {
                 switch ($cmd) {
                     case 'help':
+                    case 'commands':
                         $this->help();
+                        break;
+                    case 'explain':
+                        $this->explainCommand($parts);
                         break;
                     case 'show':
                         $this->show();
@@ -613,7 +670,7 @@ final class NDCodex
                     case 'exit':
                         return;
                     default:
-                        echo "Unknown command. Type 'help'.\n";
+                        echo "Unknown command. Type 'help' or 'commands'.\n";
                         break;
                 }
             } catch (Throwable $e) {
@@ -627,44 +684,491 @@ final class NDCodex
         echo str_repeat('=', 108) . PHP_EOL;
         echo "nDCodex.php — n-Dimensional Hash-Length Fabric REPL\n";
         echo str_repeat('=', 108) . PHP_EOL;
-        echo "Type 'help' for commands.\n\n";
+        echo "Type 'help' or 'commands' for the command list.\n\n";
+    }
+
+    /**
+     * @return array<string,array{
+     *   usage:string,
+     *   summary:string,
+     *   group:string,
+     *   role:string,
+     *   mutates:bool,
+     *   config_keys:list<string>,
+     *   constraints:list<string>,
+     *   result_type:?string,
+     *   related:list<string>,
+     *   aliases:list<string>,
+     *   visible:bool,
+     *   details:string
+     * }>
+     */
+    private function commandCatalog(): array
+    {
+        $allConfigKeys = array_map(static fn ($key): string => (string)$key, array_keys($this->cfg));
+
+        return [
+            'help' => [
+                'usage' => 'help | commands',
+                'summary' => 'Show the grouped command list.',
+                'group' => 'Core',
+                'role' => 'introspection',
+                'mutates' => false,
+                'config_keys' => [],
+                'constraints' => [],
+                'result_type' => null,
+                'related' => ['explain help', 'show'],
+                'aliases' => ['commands'],
+                'visible' => true,
+                'details' => 'Lists the available REPL commands grouped by role and reminds you which configuration keys exist.',
+            ],
+            'explain' => [
+                'usage' => 'explain <topic>',
+                'summary' => 'Explain a command in the context of the active config.',
+                'group' => 'Core',
+                'role' => 'interpretation',
+                'mutates' => false,
+                'config_keys' => [],
+                'constraints' => [],
+                'result_type' => 'explain',
+                'related' => ['help', 'show'],
+                'aliases' => [],
+                'visible' => true,
+                'details' => 'Resolves a command topic, shows what it computes or mutates, lists relevant config inputs, surfaces the formulas involved, and points to likely next commands.',
+            ],
+            'show' => [
+                'usage' => 'show',
+                'summary' => 'Display the current configuration and derived state.',
+                'group' => 'Core',
+                'role' => 'state inspection',
+                'mutates' => false,
+                'config_keys' => ['primary_alphabet', 'secondary_alphabet', 'secondary_length', 'dimension', 'min_root'],
+                'constraints' => ['h^s > p^(L-1)', 'L is valid iff L = m^n and m >= min_root'],
+                'result_type' => null,
+                'related' => ['lengths', 'fabric traverse'],
+                'aliases' => [],
+                'visible' => true,
+                'details' => 'Prints the active bases and dimensional settings, then derives the current base classification, Lmax, and currently valid primary lengths.',
+            ],
+            'set' => [
+                'usage' => 'set <key> <value>',
+                'summary' => 'Update one configuration key.',
+                'group' => 'Core',
+                'role' => 'state mutation',
+                'mutates' => true,
+                'config_keys' => $allConfigKeys,
+                'constraints' => ['Configured alphabet sizes must stay >= 2.', 'secondary_length, dimension, and min_root must stay >= 1.'],
+                'result_type' => null,
+                'related' => ['show', 'reset'],
+                'aliases' => [],
+                'visible' => true,
+                'details' => 'Parses one value, writes it into the active session config, and validates the whole configuration before accepting the change.',
+            ],
+            'reset' => [
+                'usage' => 'reset',
+                'summary' => 'Restore the default configuration.',
+                'group' => 'Core',
+                'role' => 'state reset',
+                'mutates' => true,
+                'config_keys' => $allConfigKeys,
+                'constraints' => [],
+                'result_type' => null,
+                'related' => ['show', 'set'],
+                'aliases' => [],
+                'visible' => true,
+                'details' => 'Replaces the active configuration with the constructor defaults so the REPL returns to its baseline fabric settings.',
+            ],
+            'classify' => [
+                'usage' => 'classify',
+                'summary' => 'Classify the current primary alphabet base.',
+                'group' => 'Analysis',
+                'role' => 'base-type analysis',
+                'mutates' => false,
+                'config_keys' => ['primary_alphabet'],
+                'constraints' => ['Classifies p as prime or other.'],
+                'result_type' => null,
+                'related' => ['show', 'lengths'],
+                'aliases' => [],
+                'visible' => true,
+                'details' => 'Inspects only the active primary alphabet length p and reports whether the base is prime or composite/other.',
+            ],
+            'lengths' => [
+                'usage' => 'lengths [s]',
+                'summary' => 'Compute valid primary lengths for one secondary length.',
+                'group' => 'Analysis',
+                'role' => 'dimensional validation',
+                'mutates' => false,
+                'config_keys' => ['primary_alphabet', 'secondary_alphabet', 'secondary_length', 'dimension', 'min_root'],
+                'constraints' => ['h^s > p^(L-1)', 'L is valid iff L = m^n and m >= min_root'],
+                'result_type' => 'lengths',
+                'related' => ['show', 'fabric traverse', 'witness'],
+                'aliases' => [],
+                'visible' => true,
+                'details' => 'Uses the current bases and dimensional validity rule to compute Lmax and enumerate the valid primary lengths up to that bound for one chosen s.',
+            ],
+            'fabric traverse' => [
+                'usage' => 'fabric traverse',
+                'summary' => 'Sweep the configured s-range and visualize fabric growth.',
+                'group' => 'Analysis',
+                'role' => 'structural exploration',
+                'mutates' => false,
+                'config_keys' => ['primary_alphabet', 'secondary_alphabet', 'dimension', 'min_root', 'range_s_min', 'range_s_max'],
+                'constraints' => ['h^s > p^(L-1)', 'L is valid iff L = m^n and m >= min_root'],
+                'result_type' => 'fabric_traverse',
+                'related' => ['lengths', 'witness', 'export'],
+                'aliases' => ['fabric'],
+                'visible' => true,
+                'details' => 'Traverses the configured secondary-length range, computes Lmax and valid lengths for each row, then reports valid-count and density charts.',
+            ],
+            'witness' => [
+                'usage' => 'witness <L>',
+                'summary' => 'Find the minimal s that realizes a target primary length.',
+                'group' => 'Analysis',
+                'role' => 'inverse constraint solving',
+                'mutates' => false,
+                'config_keys' => ['primary_alphabet', 'secondary_alphabet', 'dimension', 'min_root'],
+                'constraints' => ['h^s > p^(L-1)', 'L is valid iff L = m^n and m >= min_root'],
+                'result_type' => 'witness',
+                'related' => ['lengths', 'fabric traverse'],
+                'aliases' => [],
+                'visible' => true,
+                'details' => 'Checks whether a target L is dimension-valid and then solves for the minimal secondary length s needed to witness that primary length.',
+            ],
+            'paste' => [
+                'usage' => 'paste [limit]',
+                'summary' => 'Paste multiline text, analyze it, and rank matching configs.',
+                'group' => 'Matching',
+                'role' => 'input encoding',
+                'mutates' => true,
+                'config_keys' => ['dimension', 'min_root', 'match_limit', 'match_primary_min', 'match_primary_max', 'match_h_radius'],
+                'constraints' => ['char_length becomes the target s.', 'unique_count anchors h and p candidate search.', 'Ranking prefers exact valid hits, then lower gap, then closer h/p proximity to observed unique characters.'],
+                'result_type' => 'paste_match',
+                'related' => ['match', 'match apply', 'match refine', 'export'],
+                'aliases' => [],
+                'visible' => true,
+                'details' => 'Captures multiline text until .end, analyzes character length and uniqueness, then ranks nearby mathematically consistent configurations for the active dimension.',
+            ],
+            'match' => [
+                'usage' => 'match apply <rank> | match refine <rank>',
+                'summary' => 'Operate on the cached ranked match list.',
+                'group' => 'Matching',
+                'role' => 'adaptive optimisation',
+                'mutates' => true,
+                'config_keys' => ['primary_alphabet', 'secondary_alphabet', 'secondary_length', 'dimension', 'min_root', 'match_limit', 'match_primary_min', 'match_primary_max', 'match_h_radius'],
+                'constraints' => ['Ranking prefers exact valid hits, then lower gap, then closer h/p proximity to observed unique characters.'],
+                'result_type' => null,
+                'related' => ['paste', 'match apply', 'match refine'],
+                'aliases' => [],
+                'visible' => false,
+                'details' => 'Acts on the current ranked results produced by paste or a prior refine step, either applying one row to config or reranking locally around it.',
+            ],
+            'match apply' => [
+                'usage' => 'match apply <rank>',
+                'summary' => 'Apply a ranked match to the active session config.',
+                'group' => 'Matching',
+                'role' => 'adaptive optimisation',
+                'mutates' => true,
+                'config_keys' => ['primary_alphabet', 'secondary_alphabet', 'secondary_length', 'dimension'],
+                'constraints' => ['Requires ranked matches from paste or match refine.'],
+                'result_type' => null,
+                'related' => ['paste', 'match refine', 'show'],
+                'aliases' => [],
+                'visible' => true,
+                'details' => 'Takes one ranked row and writes p, h, s, and n back into the active configuration after validating the resulting session state.',
+            ],
+            'match refine' => [
+                'usage' => 'match refine <rank>',
+                'summary' => 'Locally rerank around one cached match.',
+                'group' => 'Matching',
+                'role' => 'local reranking',
+                'mutates' => true,
+                'config_keys' => ['dimension', 'min_root', 'match_limit', 'match_primary_min', 'match_primary_max', 'match_h_radius'],
+                'constraints' => ['Requires a prior paste analysis.', 'Keeps s fixed to the pasted char_length and n fixed to the selected row.', 'Local window uses p centered on the selected row with limit 7 and h centered on the selected row with radius max(1, match_h_radius).', 'Ranking prefers exact valid hits, then lower gap, then closer h/p proximity to observed unique characters.'],
+                'result_type' => 'match_refine',
+                'related' => ['paste', 'match apply', 'export'],
+                'aliases' => [],
+                'visible' => true,
+                'details' => 'Builds a narrow candidate window around one ranked row, reruns the ranking logic against the same pasted analysis, and replaces the cached ranked result list without auto-applying config.',
+            ],
+            'save' => [
+                'usage' => 'save [file.json]',
+                'summary' => 'Persist the current configuration to JSON.',
+                'group' => 'Persistence',
+                'role' => 'state persistence',
+                'mutates' => false,
+                'config_keys' => $allConfigKeys,
+                'constraints' => [],
+                'result_type' => null,
+                'related' => ['load', 'show'],
+                'aliases' => [],
+                'visible' => true,
+                'details' => 'Writes the active configuration array to disk so it can be restored in a later session.',
+            ],
+            'load' => [
+                'usage' => 'load [file.json]',
+                'summary' => 'Load configuration from JSON.',
+                'group' => 'Persistence',
+                'role' => 'state restoration',
+                'mutates' => true,
+                'config_keys' => $allConfigKeys,
+                'constraints' => ['Only recognized configuration keys are applied.', 'Loaded config is validated before it becomes active.'],
+                'result_type' => null,
+                'related' => ['save', 'show'],
+                'aliases' => [],
+                'visible' => true,
+                'details' => 'Reads a JSON config file, applies recognized keys onto the active session, and validates the resulting configuration before accepting it.',
+            ],
+            'export' => [
+                'usage' => 'export [file.json]',
+                'summary' => 'Export the last cached result payload.',
+                'group' => 'Persistence',
+                'role' => 'data extraction',
+                'mutates' => false,
+                'config_keys' => [],
+                'constraints' => ['Requires a cached result payload in $last.'],
+                'result_type' => null,
+                'related' => ['paste', 'fabric traverse', 'explain'],
+                'aliases' => [],
+                'visible' => true,
+                'details' => 'Serializes the most recent structured result payload, including richer explain, fabric traversal, and match refinement metadata.',
+            ],
+            'quit' => [
+                'usage' => 'quit | exit',
+                'summary' => 'Terminate the REPL session.',
+                'group' => 'Core',
+                'role' => 'termination',
+                'mutates' => false,
+                'config_keys' => [],
+                'constraints' => [],
+                'result_type' => null,
+                'related' => ['save'],
+                'aliases' => ['exit'],
+                'visible' => true,
+                'details' => 'Ends the current session immediately without mutating config or writing any files.',
+            ],
+        ];
+    }
+
+    /** @return array<string,string> */
+    private function configKeyNotes(): array
+    {
+        return [
+            'primary_alphabet' => '>= 2    primary output alphabet length p',
+            'secondary_alphabet' => '>= 2    secondary input alphabet length h',
+            'secondary_length' => '>= 1    secondary string length s',
+            'dimension' => '>= 1    validity dimension n',
+            'min_root' => '>= 1    require L = m^n with m >= min_root',
+            'range_s_min' => '>= 1    start of traversal range',
+            'range_s_max' => '>= 1    end of traversal range',
+            'match_limit' => '1..12   default ranked results count',
+            'match_primary_min' => '>= 2    minimum candidate primary alphabet',
+            'match_primary_max' => '>= 2    maximum candidate primary alphabet',
+            'match_h_radius' => '>= 0    how far h may vary from observed unique chars',
+        ];
     }
 
     private function help(): void
     {
-        echo <<<TXT
-Commands
---------
-help                       Show command list.
-show                       Show current configuration.
-set <key> <value>          Update configuration.
-reset                      Reset configuration to defaults.
-classify                   Classify the primary alphabet base.
-lengths [s]                Show valid primary lengths for one secondary length.
-fabric traverse            Traverse the configured secondary-length range.
-witness <L>                Show the minimal secondary length able to realise L.
-paste [limit]              Paste multiline code/text; end with .end.
-match apply <rank>         Load a ranked paste-match config into the active session.
-save [file.json]           Save configuration.
-load [file.json]           Load configuration.
-export [file.json]         Export last result payload.
-quit | exit                Leave the REPL.
+        $catalog = $this->commandCatalog();
+        $groups = ['Core', 'Analysis', 'Matching', 'Persistence'];
 
-Keys
-----
-primary_alphabet   >= 2    primary output alphabet length p
-secondary_alphabet >= 2    secondary input alphabet length h
-secondary_length   >= 1    secondary string length s
-dimension          >= 1    validity dimension n
-min_root           >= 1    require L = m^n with m >= min_root
-range_s_min        >= 1    start of traversal range
-range_s_max        >= 1    end of traversal range
-match_limit        1..12   default ranked results count
-match_primary_min  >= 2    minimum candidate primary alphabet
-match_primary_max  >= 2    maximum candidate primary alphabet
-match_h_radius     >= 0    how far h may vary from observed unique chars
-TXT;
-        echo PHP_EOL;
+        echo "Commands\n";
+        echo "--------\n";
+        foreach ($groups as $group) {
+            $printed = false;
+            foreach ($catalog as $meta) {
+                if (!$meta['visible'] || $meta['group'] !== $group) {
+                    continue;
+                }
+                if (!$printed) {
+                    echo $group . PHP_EOL;
+                    echo str_repeat('-', strlen($group)) . PHP_EOL;
+                    $printed = true;
+                }
+                echo str_pad($meta['usage'], 28) . $meta['summary'] . ' [' . $meta['role'] . ']' . PHP_EOL;
+            }
+            if ($printed) {
+                echo PHP_EOL;
+            }
+        }
+
+        echo "Keys\n";
+        echo "----\n";
+        foreach ($this->configKeyNotes() as $key => $note) {
+            echo str_pad($key, 19) . $note . PHP_EOL;
+        }
+    }
+
+    /** @return list<string> */
+    private function explainTopics(): array
+    {
+        return [
+            'help',
+            'commands',
+            'explain',
+            'show',
+            'set',
+            'reset',
+            'classify',
+            'lengths',
+            'fabric',
+            'fabric traverse',
+            'witness',
+            'paste',
+            'match',
+            'match apply',
+            'match refine',
+            'save',
+            'load',
+            'export',
+            'quit',
+            'exit',
+        ];
+    }
+
+    private function explainCommand(array $parts): void
+    {
+        $requested = strtolower(trim(implode(' ', $parts)));
+        if ($requested === '') {
+            throw new InvalidArgumentException('Usage: explain <topic>. Supported topics: ' . implode(', ', $this->explainTopics()));
+        }
+
+        $topicMap = [];
+        foreach ($this->commandCatalog() as $canonical => $meta) {
+            $topicMap[$canonical] = $canonical;
+            foreach ($meta['aliases'] as $alias) {
+                $topicMap[$alias] = $canonical;
+            }
+        }
+
+        if (!isset($topicMap[$requested])) {
+            throw new InvalidArgumentException('Unknown explain topic: ' . $requested . '. Supported topics: ' . implode(', ', $this->explainTopics()));
+        }
+
+        $payload = $this->buildExplainPayload($topicMap[$requested], $requested);
+        $this->last = $payload;
+
+        echo str_repeat('-', 108) . PHP_EOL;
+        echo 'topic                  : ' . $payload['topic'] . PHP_EOL;
+        echo 'usage                  : ' . $payload['usage'] . PHP_EOL;
+        echo 'summary                : ' . $payload['summary'] . PHP_EOL;
+        echo 'group / role           : ' . $payload['group'] . ' / ' . $payload['role'] . PHP_EOL;
+        echo 'mutates session        : ' . ($payload['mutates'] ? 'true' : 'false') . PHP_EOL;
+        echo 'what it does           : ' . $payload['details'] . PHP_EOL;
+        echo 'active config inputs   : ' . $this->formatKeyValuePairs($payload['config_snapshot']) . PHP_EOL;
+        echo 'constraints            : ' . $this->formatStringList($payload['constraints']) . PHP_EOL;
+        foreach ($payload['context'] as $label => $value) {
+            echo str_pad($label, 23) . ': ' . $value . PHP_EOL;
+        }
+        echo 'cached result type     : ' . ($payload['result_type'] ?? '(none)') . PHP_EOL;
+        echo 'related commands       : ' . $this->formatStringList($payload['related']) . PHP_EOL;
+        echo str_repeat('-', 108) . PHP_EOL;
+    }
+
+    /** @return array<string,mixed> */
+    private function buildExplainPayload(string $canonical, string $requested): array
+    {
+        $meta = $this->commandCatalog()[$canonical];
+        $configSnapshot = [];
+        foreach ($meta['config_keys'] as $key) {
+            if (array_key_exists($key, $this->cfg)) {
+                $configSnapshot[$key] = $this->cfg[$key];
+            }
+        }
+
+        return [
+            'type' => 'explain',
+            'requested_topic' => $requested,
+            'topic' => $canonical,
+            'usage' => $meta['usage'],
+            'summary' => $meta['summary'],
+            'group' => $meta['group'],
+            'role' => $meta['role'],
+            'mutates' => $meta['mutates'],
+            'details' => $meta['details'],
+            'config_snapshot' => $configSnapshot,
+            'constraints' => $meta['constraints'],
+            'context' => $this->buildExplainContext($canonical),
+            'result_type' => $meta['result_type'],
+            'related' => $meta['related'],
+        ];
+    }
+
+    /** @return array<string,string> */
+    private function buildExplainContext(string $canonical): array
+    {
+        $context = [];
+
+        switch ($canonical) {
+            case 'help':
+                $context['supports aliases'] = 'commands is a direct alias for help.';
+                break;
+            case 'explain':
+                $context['supported topics'] = implode(', ', $this->explainTopics());
+                break;
+            case 'show':
+                $p = (int)$this->cfg['primary_alphabet'];
+                $h = (int)$this->cfg['secondary_alphabet'];
+                $s = (int)$this->cfg['secondary_length'];
+                $n = (int)$this->cfg['dimension'];
+                $minRoot = (int)$this->cfg['min_root'];
+                $Lmax = Fabric::maxPrimaryLength($h, $s, $p);
+                $valid = Fabric::validLengthsUpTo($Lmax, $n, $minRoot);
+                $context['current derived state'] = 'base=' . MathUtil::classifyBase($p) . ', Lmax=' . $Lmax . ', valid=' . $this->formatValidList($valid);
+                break;
+            case 'set':
+                $context['configurable keys'] = implode(', ', array_keys($this->configKeyNotes()));
+                break;
+            case 'reset':
+                $context['reset target'] = 'constructor defaults for every config key';
+                break;
+            case 'classify':
+                $context['current base'] = 'p=' . $this->cfg['primary_alphabet'];
+                break;
+            case 'lengths':
+                $context['current secondary s'] = (string)$this->cfg['secondary_length'];
+                break;
+            case 'fabric traverse':
+                $context['current range'] = 's=' . $this->cfg['range_s_min'] . '..' . $this->cfg['range_s_max'];
+                $context['chart metrics'] = 'Each row reports Lmax, valid_count, and density = valid_count / Lmax.';
+                break;
+            case 'witness':
+                $context['current bases'] = 'h=' . $this->cfg['secondary_alphabet'] . ', p=' . $this->cfg['primary_alphabet'];
+                break;
+            case 'paste':
+                $context['current rank limit'] = (string)$this->cfg['match_limit'];
+                $context['last paste cached'] = $this->lastPasteAnalysis === null ? 'false' : 'true';
+                break;
+            case 'match':
+                $context['available ranked matches'] = $this->lastMatches === [] ? 'none (run paste first)' : (string)count($this->lastMatches);
+                $context['ranking factors'] = 'exact valid hit, gap, |h - unique_count|, |p - unique_count|';
+                break;
+            case 'match apply':
+                $context['available ranked matches'] = $this->lastMatches === [] ? 'none (run paste first)' : (string)count($this->lastMatches);
+                $context['writes keys'] = 'primary_alphabet, secondary_alphabet, secondary_length, dimension';
+                break;
+            case 'match refine':
+                $context['available ranked matches'] = $this->lastMatches === [] ? 'none (run paste first)' : (string)count($this->lastMatches);
+                $context['last paste analysis'] = $this->lastPasteAnalysis === null
+                    ? 'none (run paste first)'
+                    : 'char_length=' . $this->lastPasteAnalysis['char_length'] . ', unique_count=' . $this->lastPasteAnalysis['unique_count'];
+                $context['local window'] = 'p centered on selected row (limit 7); h centered on selected row with radius ' . max(1, (int)$this->cfg['match_h_radius']);
+                break;
+            case 'save':
+                $context['writes file'] = 'current config only';
+                break;
+            case 'load':
+                $context['recognized keys'] = implode(', ', array_keys($this->configKeyNotes()));
+                break;
+            case 'export':
+                $context['current cached result'] = $this->last === [] ? 'none' : (string)$this->last['type'];
+                break;
+            case 'quit':
+                $context['session effect'] = 'terminates immediately';
+                break;
+        }
+
+        return $context;
     }
 
     private function show(): void
@@ -752,19 +1256,36 @@ TXT;
             throw new InvalidArgumentException('range_s_min must be <= range_s_max.');
         }
 
-        echo str_pad('s', 8) . str_pad('Lmax', 10) . "valid primary lengths\n";
+        echo str_pad('s', 8) . str_pad('Lmax', 10) . str_pad('count', 8) . str_pad('density', 10) . "valid primary lengths\n";
         echo str_repeat('-', 108) . PHP_EOL;
         $rows = [];
         for ($s = $sMin; $s <= $sMax; ++$s) {
             $Lmax = Fabric::maxPrimaryLength($h, $s, $p);
             $valid = Fabric::validLengthsUpTo($Lmax, $n, $minRoot);
-            echo str_pad((string)$s, 8) . str_pad((string)$Lmax, 10) . $this->formatValidList($valid) . PHP_EOL;
-            $rows[] = ['s' => $s, 'Lmax' => $Lmax, 'valid' => $valid];
+            $validCount = count($valid);
+            $density = $Lmax > 0 ? $validCount / $Lmax : 0.0;
+            echo str_pad((string)$s, 8)
+                . str_pad((string)$Lmax, 10)
+                . str_pad((string)$validCount, 8)
+                . str_pad($this->formatPercent($density), 10)
+                . $this->formatValidList($valid)
+                . PHP_EOL;
+            $rows[] = [
+                's' => $s,
+                'Lmax' => $Lmax,
+                'valid' => $valid,
+                'valid_count' => $validCount,
+                'density' => $density,
+            ];
         }
+
+        $summary = $this->summarizeFabricRows($rows);
+        $this->renderFabricCharts($rows, $summary);
 
         $this->last = [
             'type' => 'fabric_traverse',
             'rows' => $rows,
+            'summary' => $summary,
             'config' => $this->cfg,
         ];
     }
@@ -823,56 +1344,15 @@ TXT;
         }
 
         $text = implode("\n", $lines);
-        $analysis = TextAnalyzer::analyze($text);
+        $analysis = $this->compactAnalysis(TextAnalyzer::analyze($text));
         $matches = MatchEngine::rank($this->cfg, $analysis, $limit);
+        $this->lastPasteAnalysis = $analysis;
         $this->lastMatches = $matches;
-
-        echo 'pasted text lines      : ' . $analysis['line_count'] . PHP_EOL;
-        echo 'pasted char length     : ' . $analysis['char_length'] . PHP_EOL;
-        echo 'observed unique chars  : ' . $analysis['unique_count'] . PHP_EOL;
-        echo 'effective sec alphabet : ' . max(2, $analysis['unique_count']) . PHP_EOL;
-        echo 'active dimension       : ' . $this->cfg['dimension'] . PHP_EOL;
-        echo 'unique char preview    : ' . $analysis['preview'] . PHP_EOL;
-        echo str_repeat('-', 108) . PHP_EOL;
-        echo str_pad('#', 4)
-            . str_pad('p', 8)
-            . str_pad('h', 8)
-            . str_pad('s', 12)
-            . str_pad('n', 6)
-            . str_pad('Lmax', 10)
-            . str_pad('closest_L', 12)
-            . str_pad('m', 8)
-            . str_pad('gap', 8)
-            . str_pad('exact', 8)
-            . "type\n";
-        echo str_repeat('-', 108) . PHP_EOL;
-
-        foreach ($matches as $i => $row) {
-            echo str_pad((string)($i + 1), 4)
-                . str_pad((string)$row['p'], 8)
-                . str_pad((string)$row['h'], 8)
-                . str_pad((string)$row['s'], 12)
-                . str_pad((string)$row['n'], 6)
-                . str_pad((string)$row['Lmax'], 10)
-                . str_pad((string)$row['closest_L'], 12)
-                . str_pad((string)$row['m'], 8)
-                . str_pad((string)$row['gap'], 8)
-                . str_pad($row['exact'] ? 'true' : 'false', 8)
-                . $row['base_type']
-                . PHP_EOL;
-        }
-        echo str_repeat('-', 108) . PHP_EOL;
-        echo "Use 'match apply <rank>' to load one of these configs into the active session.\n";
+        $this->renderMatchResults($analysis, $matches);
 
         $this->last = [
             'type' => 'paste_match',
-            'analysis' => [
-                'line_count' => $analysis['line_count'],
-                'char_length' => $analysis['char_length'],
-                'unique_count' => $analysis['unique_count'],
-                'unique_chars' => $analysis['unique_chars'],
-                'preview' => $analysis['preview'],
-            ],
+            'analysis' => $analysis,
             'matches' => $matches,
             'config' => $this->cfg,
         ];
@@ -881,23 +1361,63 @@ TXT;
     private function matchCommand(array $parts): void
     {
         $sub = strtolower((string)($parts[0] ?? ''));
-        if ($sub !== 'apply' || !isset($parts[1])) {
-            throw new InvalidArgumentException('Usage: match apply <rank>');
+        $rank = isset($parts[1]) ? (int)$parts[1] : 0;
+
+        switch ($sub) {
+            case 'apply':
+                if (!isset($parts[1])) {
+                    throw new InvalidArgumentException('Usage: match apply <rank>');
+                }
+                $row = $this->requireMatchRow($rank);
+                $this->cfg['primary_alphabet'] = (int)$row['p'];
+                $this->cfg['secondary_alphabet'] = (int)$row['h'];
+                $this->cfg['secondary_length'] = (int)$row['s'];
+                $this->cfg['dimension'] = (int)$row['n'];
+                $this->validateConfig();
+                echo 'Applied match #' . $rank . ' -> p=' . $row['p'] . ', h=' . $row['h'] . ', s=' . $row['s'] . ', n=' . $row['n'] . PHP_EOL;
+                break;
+            case 'refine':
+                if (!isset($parts[1])) {
+                    throw new InvalidArgumentException('Usage: match refine <rank>');
+                }
+                if ($this->lastPasteAnalysis === null) {
+                    throw new RuntimeException('No paste analysis available yet. Run paste first.');
+                }
+                $row = $this->requireMatchRow($rank);
+                $primaryMin = max(2, (int)$this->cfg['match_primary_min']);
+                $primaryMax = max($primaryMin, (int)$this->cfg['match_primary_max']);
+                $pCandidates = MathUtil::centeredIntegers((int)$row['p'], $primaryMin, $primaryMax, 7);
+                $radius = max(1, (int)$this->cfg['match_h_radius']);
+                $hCenter = max(2, (int)$row['h']);
+                $hCandidates = MathUtil::centeredIntegers($hCenter, max(2, $hCenter - $radius), max(2, $hCenter + $radius), max(3, 2 * $radius + 1));
+                $matches = MatchEngine::rankWithCandidates($this->cfg, $this->lastPasteAnalysis, (int)$this->cfg['match_limit'], $pCandidates, $hCandidates, (int)$row['n']);
+                if ($matches === []) {
+                    throw new RuntimeException('No refined matches found in the local search window.');
+                }
+
+                $this->lastMatches = $matches;
+                $context = [
+                    'Refined match candidates (local rerank)',
+                    'refinement source      : rank #' . $rank . ' -> p=' . $row['p'] . ', h=' . $row['h'] . ', s=' . $row['s'] . ', n=' . $row['n'],
+                    'candidate window       : p=' . implode(', ', $pCandidates) . ' | h=' . implode(', ', $hCandidates),
+                ];
+                $this->renderMatchResults($this->lastPasteAnalysis, $matches, $context, (int)$row['n']);
+                $this->last = [
+                    'type' => 'match_refine',
+                    'source_rank' => $rank,
+                    'source_row' => $row,
+                    'analysis' => $this->lastPasteAnalysis,
+                    'candidate_window' => [
+                        'p' => $pCandidates,
+                        'h' => $hCandidates,
+                    ],
+                    'matches' => $matches,
+                    'config' => $this->cfg,
+                ];
+                break;
+            default:
+                throw new InvalidArgumentException('Usage: match apply <rank> | match refine <rank>');
         }
-        if ($this->lastMatches === []) {
-            throw new RuntimeException('No ranked matches available yet. Run paste first.');
-        }
-        $rank = (int)$parts[1];
-        if ($rank < 1 || $rank > count($this->lastMatches)) {
-            throw new InvalidArgumentException('Rank out of range.');
-        }
-        $row = $this->lastMatches[$rank - 1];
-        $this->cfg['primary_alphabet'] = (int)$row['p'];
-        $this->cfg['secondary_alphabet'] = (int)$row['h'];
-        $this->cfg['secondary_length'] = (int)$row['s'];
-        $this->cfg['dimension'] = (int)$row['n'];
-        $this->validateConfig();
-        echo 'Applied match #' . $rank . ' -> p=' . $row['p'] . ', h=' . $row['h'] . ', s=' . $row['s'] . ', n=' . $row['n'] . PHP_EOL;
     }
 
     private function saveCommand(array $parts): void
@@ -997,6 +1517,175 @@ TXT;
             }
         }
         return implode(', ', $parts);
+    }
+
+    /** @param array{chars:list<string>,char_length:int,unique_count:int,unique_chars:list<string>,line_count:int,preview:string} $analysis */
+    private function compactAnalysis(array $analysis): array
+    {
+        return [
+            'line_count' => (int)$analysis['line_count'],
+            'char_length' => (int)$analysis['char_length'],
+            'unique_count' => (int)$analysis['unique_count'],
+            'unique_chars' => $analysis['unique_chars'],
+            'preview' => (string)$analysis['preview'],
+        ];
+    }
+
+    /** @param list<string> $contextLines */
+    private function renderMatchResults(array $analysis, array $matches, array $contextLines = [], ?int $dimension = null): void
+    {
+        foreach ($contextLines as $line) {
+            echo $line . PHP_EOL;
+        }
+        echo 'pasted text lines      : ' . $analysis['line_count'] . PHP_EOL;
+        echo 'pasted char length     : ' . $analysis['char_length'] . PHP_EOL;
+        echo 'observed unique chars  : ' . $analysis['unique_count'] . PHP_EOL;
+        echo 'effective sec alphabet : ' . max(2, (int)$analysis['unique_count']) . PHP_EOL;
+        echo 'active dimension       : ' . ($dimension ?? (int)$this->cfg['dimension']) . PHP_EOL;
+        echo 'unique char preview    : ' . $analysis['preview'] . PHP_EOL;
+        echo str_repeat('-', 108) . PHP_EOL;
+        echo str_pad('#', 4)
+            . str_pad('p', 8)
+            . str_pad('h', 8)
+            . str_pad('s', 12)
+            . str_pad('n', 6)
+            . str_pad('Lmax', 10)
+            . str_pad('closest_L', 12)
+            . str_pad('m', 8)
+            . str_pad('gap', 8)
+            . str_pad('exact', 8)
+            . "type\n";
+        echo str_repeat('-', 108) . PHP_EOL;
+
+        foreach ($matches as $i => $row) {
+            echo str_pad((string)($i + 1), 4)
+                . str_pad((string)$row['p'], 8)
+                . str_pad((string)$row['h'], 8)
+                . str_pad((string)$row['s'], 12)
+                . str_pad((string)$row['n'], 6)
+                . str_pad((string)$row['Lmax'], 10)
+                . str_pad((string)$row['closest_L'], 12)
+                . str_pad((string)$row['m'], 8)
+                . str_pad((string)$row['gap'], 8)
+                . str_pad($row['exact'] ? 'true' : 'false', 8)
+                . $row['base_type']
+                . PHP_EOL;
+        }
+        echo str_repeat('-', 108) . PHP_EOL;
+        echo "Use 'match apply <rank>' to load one of these configs into the active session.\n";
+    }
+
+    /** @return array<string,mixed> */
+    private function requireMatchRow(int $rank): array
+    {
+        if ($this->lastMatches === []) {
+            throw new RuntimeException('No ranked matches available yet. Run paste first.');
+        }
+        if ($rank < 1 || $rank > count($this->lastMatches)) {
+            throw new InvalidArgumentException('Rank out of range.');
+        }
+        return $this->lastMatches[$rank - 1];
+    }
+
+    /** @param array<string,mixed> $summary */
+    private function renderFabricCharts(array $rows, array $summary): void
+    {
+        echo str_repeat('-', 108) . PHP_EOL;
+        echo 'range summary          : s=' . $summary['start_s'] . '..' . $summary['end_s']
+            . ' | max Lmax=' . $summary['max_Lmax'] . ' @ s=' . $summary['max_Lmax_s']
+            . ' | best density=' . $this->formatPercent((float)$summary['best_density']) . ' @ s=' . $summary['best_density_s']
+            . PHP_EOL;
+        echo 'max valid-count        : ' . $summary['max_valid_count'] . ' @ s=' . $summary['max_valid_count_s'] . PHP_EOL;
+        echo str_repeat('-', 108) . PHP_EOL;
+        echo "Lmax growth chart\n";
+        echo "-----------------\n";
+        $barWidth = 32;
+        $scaleMax = max(1, (int)$summary['max_Lmax']);
+        foreach ($rows as $row) {
+            $filled = (int)round((((int)$row['Lmax']) / $scaleMax) * $barWidth);
+            echo str_pad('s=' . $row['s'], 8) . '|' . $this->buildBar($filled, $barWidth) . '| ' . $row['Lmax'] . PHP_EOL;
+        }
+        echo str_repeat('-', 108) . PHP_EOL;
+        echo "Valid-length density chart\n";
+        echo "--------------------------\n";
+        foreach ($rows as $row) {
+            $filled = (int)round(((float)$row['density']) * $barWidth);
+            echo str_pad('s=' . $row['s'], 8)
+                . '|'
+                . $this->buildBar($filled, $barWidth)
+                . '| '
+                . $this->formatPercent((float)$row['density'])
+                . ' (' . $row['valid_count'] . '/' . $row['Lmax'] . ')'
+                . PHP_EOL;
+        }
+        echo str_repeat('-', 108) . PHP_EOL;
+    }
+
+    /** @return array<string,int|float> */
+    private function summarizeFabricRows(array $rows): array
+    {
+        $first = $rows[0];
+        $summary = [
+            'start_s' => (int)$first['s'],
+            'end_s' => (int)$first['s'],
+            'max_Lmax' => (int)$first['Lmax'],
+            'max_Lmax_s' => (int)$first['s'],
+            'best_density' => (float)$first['density'],
+            'best_density_s' => (int)$first['s'],
+            'max_valid_count' => (int)$first['valid_count'],
+            'max_valid_count_s' => (int)$first['s'],
+        ];
+
+        foreach ($rows as $row) {
+            $summary['end_s'] = (int)$row['s'];
+            if ((int)$row['Lmax'] > $summary['max_Lmax']) {
+                $summary['max_Lmax'] = (int)$row['Lmax'];
+                $summary['max_Lmax_s'] = (int)$row['s'];
+            }
+            if ((float)$row['density'] > $summary['best_density']) {
+                $summary['best_density'] = (float)$row['density'];
+                $summary['best_density_s'] = (int)$row['s'];
+            }
+            if ((int)$row['valid_count'] > $summary['max_valid_count']) {
+                $summary['max_valid_count'] = (int)$row['valid_count'];
+                $summary['max_valid_count_s'] = (int)$row['s'];
+            }
+        }
+
+        return $summary;
+    }
+
+    private function buildBar(int $filled, int $width): string
+    {
+        $filled = max(0, min($width, $filled));
+        return str_repeat('#', $filled) . str_repeat('.', $width - $filled);
+    }
+
+    private function formatPercent(float $ratio): string
+    {
+        return number_format($ratio * 100, 2) . '%';
+    }
+
+    /** @param array<string,mixed> $pairs */
+    private function formatKeyValuePairs(array $pairs): string
+    {
+        if ($pairs === []) {
+            return '(none)';
+        }
+        $parts = [];
+        foreach ($pairs as $key => $value) {
+            if (is_bool($value)) {
+                $value = $value ? 'true' : 'false';
+            }
+            $parts[] = $key . '=' . $value;
+        }
+        return implode(', ', $parts);
+    }
+
+    /** @param list<string> $items */
+    private function formatStringList(array $items): string
+    {
+        return $items === [] ? '(none)' : implode('; ', $items);
     }
 
     private function prompt(string $text): ?string
