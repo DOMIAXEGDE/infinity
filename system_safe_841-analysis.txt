@@ -1,0 +1,42 @@
+Paste analysis complete.
+
+```text id="n18423"
+line_count                : 47
+character_length          : 841
+unique_character_count    : 62
+effective secondary h     : 62
+active dimension n        : 2
+min_root                  : 2
+unique-character preview  : \t \n <space> ! " # % & ( ) * + , - . 0 1 2 3 5 6 7 : ; < = > E F I L M [ \ ] _ a b c d e f g h i k l m n o p r s t u v w x y { | }
+```
+
+Mathematical interpretation:
+
+For this paste payload, `s = 841` and `observedUnique = 62`. With `match_h_radius = 0`, the candidate secondary alphabet is fixed at `h = 62`. Under the active dimension `n = 2`, valid lengths must be squares `L = m^2` with `m >= 2`. Here `841 = 29^2`, so this paste is an exact dimension-valid hit with gap `0`.  
+
+Top ranked matches:
+
+```text id="n18424"
+#   p   h   s    n   Lmax  closest_L  m    gap  exact  base
+1   62  62  841  2   841   841        29   0    true   other
+2   61  62  841  2   845   841        29   0    true   prime
+3   60  62  841  2   848   841        29   0    true   other
+4   59  62  841  2   852   841        29   0    true   prime
+5   58  62  841  2   855   841        29   0    true   other
+6   57  62  841  2   859   841        29   0    true   other
+7   56  62  841  2   863   841        29   0    true   other
+8   55  62  841  2   867   841        29   0    true   other
+9   54  62  841  2   871   841        29   0    true   other
+10  53  62  841  2   875   841        29   0    true   prime
+11  52  62  841  2   879   841        29   0    true   other
+12  51  62  841  2   883   841        29   0    true   other
+```
+
+Best current match is rank `1`, with `p=62, h=62, s=841, n=2`.
+
+```text id="n18425"
+lastPasteAnalysis : stored
+lastMatches       : 12 rows stored
+last result type  : paste_match
+active config     : unchanged
+```
